@@ -1,18 +1,18 @@
 #!/bin/sh
-set -e
 
 BIN=catsay
 REPO="LiTLiTschi/catsay"
 INSTALL_DIR="/usr/local/bin"
-TMP=$(mktemp)
 
 die() { echo "error: $1" >&2; exit 1; }
 
 # pick downloader
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fsSL "$1" -o "$2"; }
+  fetch()    { curl -fsSL "$1" -o "$2"; }
+  fetch_out() { curl -fsSL "$1"; }
 elif command -v wget >/dev/null 2>&1; then
-  fetch() { wget -qO "$2" "$1"; }
+  fetch()    { wget -qO "$2" "$1"; }
+  fetch_out() { wget -qO- "$1"; }
 else
   die "neither curl nor wget found"
 fi
@@ -33,6 +33,7 @@ esac
 SUFFIX="${OS}-${ARCH}"
 
 # resolve install dir
+SUDO=""
 if [ ! -w "$INSTALL_DIR" ]; then
   if command -v sudo >/dev/null 2>&1; then
     SUDO=sudo
@@ -43,19 +44,34 @@ if [ ! -w "$INSTALL_DIR" ]; then
 fi
 
 # --- try prebuilt binary from latest release ---
-LATEST=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" /dev/stdout 2>/dev/null \
+LATEST=$(fetch_out "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
   | grep '"tag_name"' | head -1 \
   | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
 
 if [ -n "$LATEST" ]; then
-  URL="https://github.com/${REPO}/releases/download/${LATEST}/${BIN}-${SUFFIX}"
+  URL="https://github.com/${REPO}/releases/download/${LATEST}/${BIN}-${SUFFIX}.tar.gz"
+  TMPTAR=$(mktemp)
   echo "Downloading ${BIN} ${LATEST} (${SUFFIX})..."
-  if fetch "$URL" "$TMP" 2>/dev/null && [ -s "$TMP" ]; then
-    chmod +x "$TMP"
-    $SUDO mv "$TMP" "${INSTALL_DIR}/${BIN}"
-    echo "Installed ${BIN} ${LATEST} -> ${INSTALL_DIR}/${BIN}"
-    exit 0
+  if fetch "$URL" "$TMPTAR"; then
+    if [ -s "$TMPTAR" ]; then
+      TMP=$(mktemp)
+      if tar -xzOf "$TMPTAR" "$BIN" > "$TMP" 2>/dev/null && [ -s "$TMP" ]; then
+        chmod +x "$TMP"
+        $SUDO mv "$TMP" "${INSTALL_DIR}/${BIN}"
+        rm -f "$TMPTAR"
+        echo "Installed ${BIN} ${LATEST} -> ${INSTALL_DIR}/${BIN}"
+        exit 0
+      else
+        echo "error: tar extraction failed" >&2
+      fi
+      rm -f "$TMP"
+    else
+      echo "error: downloaded file is empty" >&2
+    fi
+  else
+    echo "error: download failed for $URL" >&2
   fi
+  rm -f "$TMPTAR"
 fi
 
 # --- fallback: build from source with Go ---
@@ -71,23 +87,21 @@ if ! command -v go >/dev/null 2>&1; then
 
   echo "Installing Go via the official installer..."
   GOTMP=$(mktemp -d)
-  trap 'rm -rf "$GOTMP"' EXIT
   GO_VERSION="1.22.3"
-  GO_ARCH="$ARCH"
-  GO_TARBALL="go${GO_VERSION}.${OS}-${GO_ARCH}.tar.gz"
+  GO_TARBALL="go${GO_VERSION}.${OS}-${ARCH}.tar.gz"
   fetch "https://go.dev/dl/${GO_TARBALL}" "${GOTMP}/${GO_TARBALL}"
   $SUDO tar -C /usr/local -xzf "${GOTMP}/${GO_TARBALL}"
+  rm -rf "$GOTMP"
   export PATH="$PATH:/usr/local/go/bin"
   echo "Go installed to /usr/local/go"
 fi
 
 BUILDTMP=$(mktemp -d)
-trap 'rm -rf "$BUILDTMP"' EXIT
-
-fetch "https://raw.githubusercontent.com/${REPO}/main/main.go" "${BUILDTMP}/main.go"
-fetch "https://raw.githubusercontent.com/${REPO}/main/go.mod"  "${BUILDTMP}/go.mod"
-
+fetch_out "https://raw.githubusercontent.com/${REPO}/main/main.go" > "${BUILDTMP}/main.go"
+fetch_out "https://raw.githubusercontent.com/${REPO}/main/go.mod"  > "${BUILDTMP}/go.mod"
+TMP=$(mktemp)
 ( cd "$BUILDTMP" && CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o "$TMP" . )
+rm -rf "$BUILDTMP"
 chmod +x "$TMP"
 $SUDO mv "$TMP" "${INSTALL_DIR}/${BIN}"
 echo "Built and installed ${BIN} -> ${INSTALL_DIR}/${BIN}"
